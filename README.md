@@ -1,7 +1,7 @@
 
 <div align="center">
 
-# Zero Code
+# Zero Cli
 
 An agentic coding assistant for the terminal, with a pixel-art mascot named Zero-chan 🌸
 
@@ -16,7 +16,7 @@ An agentic coding assistant for the terminal, with a pixel-art mascot named Zero
 
 ---
 
-Zero Code is a terminal app that works on your project together with a language model. It can read and search files, edit code, run shell commands and keep a todo list, and it asks for permission before it changes anything. It works with Anthropic, OpenAI and any OpenAI-compatible API, including local models through Ollama or LM Studio.
+Zero Cli is a terminal app that works on your project together with a language model. It can read and search files, edit code, run shell commands and keep a todo list, and it asks for permission before it changes anything. It works with Anthropic, OpenAI and any OpenAI-compatible API, including local models through Ollama or LM Studio.
 
 There is also a built-in mock model, so you can try every feature without an API key. The interface is available in English and Russian.
 
@@ -71,7 +71,7 @@ You can switch profiles at any time, including in the middle of a chat:
 /model <name>              change the model of the active profile
 ```
 
-If a profile has no API key saved, Zero Code uses the `ANTHROPIC_API_KEY` or `ZERO_API_KEY` environment variable instead. Anthropic profiles also have settings for effort level and max output tokens.
+If a profile has no API key saved, Zero Cli uses the `ANTHROPIC_API_KEY` or `ZERO_API_KEY` environment variable instead. Anthropic profiles also have settings for effort level and max output tokens.
 
 ## Tools
 
@@ -104,7 +104,7 @@ Starting with `--dangerously-skip-permissions` adds a bypass mode that turns off
 
 ### Full auto
 
-In full auto, Zero Code doesn't show permission prompts. If a turn ends with unfinished todos, it starts the next turn by itself. *Max autonomous turns* in the settings limits how many times it does this (10 by default). Press `esc` to stop it at any time.
+In full auto, Zero Cli doesn't show permission prompts. If a turn ends with unfinished todos, it starts the next turn by itself. *Max autonomous turns* in the settings limits how many times it does this (10 by default). Press `esc` to stop it at any time.
 
 A safety guard stays on in full auto unless you turn it off in the settings. It blocks commands such as `rm -rf /`, disk formatting, `dd` to a device, shutdown, `git push --force`, `git reset --hard`, recursive deletes on Windows, and piping a download into a shell. Bypass mode has no guard.
 
