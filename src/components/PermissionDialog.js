@@ -88,6 +88,7 @@ export function PermissionDialog({ req, columns, onAnswer }) {
 
   return html`
     <${Box} flexDirection="column" borderStyle="round" borderColor=${theme.permission} paddingX=${1} marginTop=${1} width=${columns}>
+      ${req.agent && html`<${Text} color=${theme.brand}>✻ ${t('orch.permissionFrom', req.agent)}</${Text}>`}
       <${Text} bold color=${theme.permission}>${title}</${Text}>
       <${Body} req=${req} columns=${columns} />
       <${Text}>${question}</${Text}>

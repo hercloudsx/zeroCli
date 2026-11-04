@@ -26,13 +26,25 @@ const estimateTokens = (s) => Math.ceil((s?.length ?? 0) / 4);
  * model -> tool_use -> permission -> tool -> tool_result -> model ... until the model stops.
  */
 export class Engine {
-  constructor({ cwd, provider, permissionMode = 'default' }) {
+  /**
+   * Optional, for orchestration:
+   *   tools        tool objects this engine may use (default: all built-in tools)
+   *   systemPrompt function returning the full system prompt (default: Zero-chan's)
+   *   systemExtra  text appended to the default system prompt
+   *   context      extra fields passed to every tool call (e.g. the orchestration controller)
+   *   allowRules   share "don't ask again" rules with another engine
+   */
+  constructor({ cwd, provider, permissionMode = 'default', tools, systemPrompt, systemExtra, context, allowRules }) {
     this.cwd = cwd;
     this.originalCwd = cwd;
     this.provider = provider;
     this.permissionMode = permissionMode;
+    this.tools = tools ?? null;
+    this.customSystem = systemPrompt ?? null;
+    this.systemExtra = systemExtra ?? '';
+    this.extraContext = context ?? {};
     this.messages = [];
-    this.allowRules = new Set();
+    this.allowRules = allowRules ?? new Set();
     this.readFiles = new Map();
     this.todos = [];
     // How each tool call ended ({ status, display, error }), keyed by tool_use id,
@@ -52,7 +64,21 @@ export class Engine {
     };
   }
 
+  #findTool(name) {
+    return this.tools ? this.tools.find((t) => t.name === name) : getTool(name);
+  }
+
+  #toolSchemas() {
+    if (!this.tools) return toolSchemas();
+    return this.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
+  }
+
   systemPrompt() {
+    if (this.customSystem) return this.customSystem();
+    return this.#defaultSystemPrompt() + (this.systemExtra ? `\n\n${this.systemExtra}` : '');
+  }
+
+  #defaultSystemPrompt() {
     let memory = '';
     const file = path.join(this.originalCwd, MEMORY_FILE);
     try {
@@ -94,6 +120,7 @@ export class Engine {
       stats: this.stats,
       signal,
       defaultTimeout: settings.bashTimeout * 1000,
+      ...this.extraContext,
     };
   }
 
@@ -209,7 +236,7 @@ export class Engine {
     const stream = this.provider.stream({
       system: this.systemPrompt(),
       messages: this.messages,
-      tools: toolSchemas(),
+      tools: this.#toolSchemas(),
       signal,
       cwd: this.cwd,
       todos: this.todos,
@@ -248,7 +275,7 @@ export class Engine {
   }
 
   async #runTool(tu, ui, signal) {
-    const tool = getTool(tu.name);
+    const tool = this.#findTool(tu.name);
     const fail = (msg, status = 'error') => {
       ui.onToolEnd(tu.id, { status, error: msg });
       return { result: { type: 'tool_result', tool_use_id: tu.id, content: msg, is_error: true } };

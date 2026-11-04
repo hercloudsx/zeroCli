@@ -3,6 +3,7 @@ import path from 'node:path';
 import { AbortError, newId } from '../agent/engine.js';
 import { settings } from '../utils/settings.js';
 import { t, lang, ruPlural } from '../i18n.js';
+import { getModel } from '../orch/catalog.js';
 
 /**
  * An offline "model" so the whole agent loop (streaming, tool calls, permissions,
@@ -640,6 +641,69 @@ export class MockProvider {
     return t('mock.description');
   }
 
+  /**
+   * Offline orchestrator: split the task into parts, give each part to a subagent
+   * (rotating through the cheapest models of different providers), wait, summarise.
+   */
+  async *#orchestrate(messages, system, signal) {
+    const { userText } = turnState(messages);
+    const L = /[а-яё]/i.test(userText) ? 'ru' : lang();
+    const called = messages.flatMap((m) => (m.role === 'assistant' ? m.content.filter((b) => b.type === 'tool_use').map((b) => b.name) : []));
+    await sleep(rand(500, 1000), signal);
+
+    if (!called.includes('spawn_agent')) {
+      const parts = userText
+        .split(/\s*(?:\n|;|,|\band then\b|\bthen\b|\band\b|\sи затем\s|\sзатем\s|\sпотом\s|\sи\s)\s*/i)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 6);
+      const available = (/Available subagent models: (.+)/.exec(system ?? '')?.[1] ?? 'mock').split(',').map((s) => s.trim()).filter(Boolean);
+      // Cheapest model of each provider first, so the demo spreads work across providers.
+      const byFamily = new Map();
+      // Like a real orchestrator should: skip models with poor uptime when others are available.
+      const reliable = available.filter((id) => (getModel(id)?.uptime ?? 100) >= 90);
+      for (const id of reliable.length ? reliable : available) {
+        const m = getModel(id);
+        const fam = m?.family ?? id;
+        const cur = byFamily.get(fam);
+        if (!cur || (m?.cost ?? 99) < (getModel(cur)?.cost ?? 99)) byFamily.set(fam, id);
+      }
+      const picks = [...byFamily.values()].sort((a, b) => (getModel(a)?.cost ?? 99) - (getModel(b)?.cost ?? 99));
+      const plan =
+        L === 'ru'
+          ? `План: ${parts.length} ${ruPlural(parts.length, 'задача', 'задачи', 'задач')}, раздам их субагентам параллельно.`
+          : `Plan: ${parts.length} ${parts.length === 1 ? 'task' : 'tasks'}, handing them to subagents in parallel.`;
+      yield* this.#streamText(plan, signal);
+      for (const [i, part] of parts.entries()) {
+        await sleep(rand(80, 160), signal);
+        yield { type: 'tool_use', id: newId('toolu'), name: 'spawn_agent', input: { model: picks[i % picks.length] ?? 'mock', task: part, name: part } };
+      }
+      return;
+    }
+
+    if (!called.includes('wait_agents')) {
+      yield { type: 'tool_use', id: newId('toolu'), name: 'wait_agents', input: {} };
+      return;
+    }
+
+    // Summarise the reports returned by wait_agents.
+    const waitResult = [...messages].reverse().flatMap((m) => m.content).find((b) => b.type === 'tool_result' && String(b.content).trim().startsWith('['));
+    let reports = [];
+    try {
+      reports = JSON.parse(String(waitResult?.content ?? '[]'));
+    } catch {}
+    const ok = reports.filter((r) => r.status === 'done').length;
+    const head =
+      L === 'ru'
+        ? `Готово: ${ok} из ${reports.length} ${ruPlural(reports.length, 'агента', 'агентов', 'агентов')} справились.`
+        : `Done: ${ok} of ${reports.length} ${reports.length === 1 ? 'agent' : 'agents'} finished their task.`;
+    const lines = reports.map((r) => {
+      const first = String(r.report ?? r.error ?? r.status).split('\n').find((l) => l.trim()) ?? '';
+      return `- **#${r.agent_id.replace('agent-', '')} · ${r.model}** (${r.name}) — ${r.status}, ${r.elapsed_seconds}s: ${first.slice(0, 120)}`;
+    });
+    yield* this.#streamText([head, '', ...lines].join('\n'), signal);
+  }
+
   async *#streamText(text, signal) {
     const chunks = text.match(/\s*\S+|\s+/g) ?? [];
     for (let i = 0; i < chunks.length; i += 2) {
@@ -648,7 +712,11 @@ export class MockProvider {
     }
   }
 
-  async *stream({ messages, signal, cwd, todos }) {
+  async *stream({ messages, signal, cwd, todos, tools, system }) {
+    if (tools?.some((x) => x.name === 'spawn_agent')) {
+      yield* this.#orchestrate(messages, system, signal);
+      return;
+    }
     const { userMsg, userText, results } = turnState(messages);
     // Plan once per user message, so later steps don't change as files change.
     let intent = userMsg && this.plans.get(userMsg);

@@ -7,6 +7,7 @@ import { renderMarkdown, renderInline, highlight } from './markdown.js';
 import { getTool } from '../tools/index.js';
 import { Welcome } from './Welcome.js';
 import { t, tm } from '../i18n.js';
+import { AgentsPanel, fmtElapsed } from './AgentsPanel.js';
 import path from 'node:path';
 
 const COLLAPSED_LINES = 3;
@@ -319,6 +320,20 @@ function Notice({ item }) {
   `;
 }
 
+/** End of an /orch run: a one-line summary and the frozen agents table. */
+function OrchSummary({ item, columns }) {
+  const { snapshot } = item;
+  const done = snapshot.agents.filter((a) => a.status === 'done').length;
+  const failed = snapshot.agents.filter((a) => a.status === 'failed').length;
+  const time = fmtElapsed(snapshot.endedAt - snapshot.startedAt);
+  return html`
+    <${Box} flexDirection="column" marginTop=${1}>
+      <${Text}><${Text} color=${theme.brand}>✻ </${Text}><${Text} bold>${t('orch.summary', { n: snapshot.agents.length, done, failed, time })}</${Text}></${Text}>
+      <${Box} paddingLeft=${2}><${AgentsPanel} snapshot=${snapshot} columns=${Math.max(40, columns - 2)} final=${true} /></${Box}>
+    </${Box}>
+  `;
+}
+
 export function MessageItem({ item, columns, verbose, cwd, model }) {
   switch (item.type) {
     case 'welcome':
@@ -341,6 +356,8 @@ export function MessageItem({ item, columns, verbose, cwd, model }) {
       return html`<${Notice} item=${item} />`;
     case 'custom':
       return html`<${Box} marginTop=${1}>${item.render()}</${Box}>`;
+    case 'orch':
+      return html`<${OrchSummary} item=${item} columns=${columns} />`;
     default:
       return null;
   }

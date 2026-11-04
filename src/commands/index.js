@@ -259,6 +259,15 @@ export const COMMANDS = [
     { aliases: ['profile', 'providers'] },
   ),
 
+  // /orch <task>: an orchestrator model plans the work and delegates it to subagents.
+  cmd('orch', 'cmd.orch', (args, app) => {
+    const task = (args || '').trim();
+    if (!task) return app.local('/orch', t('orch.usage'));
+    app.runOrch(task);
+  }),
+
+  cmd('orch-setup', 'cmd.orchSetup', (args, app) => app.openOrchSetup()),
+
   cmd('init', 'cmd.init', (args, app) => {
     const data = analyzeProject(app.engine.originalCwd);
     app.runPrompt(`<zero-command name="init">${JSON.stringify(data)}</zero-command>`, '/init');

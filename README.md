@@ -117,11 +117,46 @@ Each conversation is saved per project in `~/.zero/chats/` after every turn.
 
 The footer shows the token count for the current chat. When the provider reports usage, the count comes from the API. Otherwise it is an estimate.
 
+## Orchestration
+
+`/orch <task>` hands a task to an orchestrator model. The orchestrator plans the work and splits it into self-contained tasks. Each task goes to a subagent running a model it picks from the catalog. Independent tasks run in parallel. When the agents finish, the orchestrator reviews their reports, retries failures on another model, and sums up.
+
+While it runs, a live panel shows every agent:
+
+```
+◓ orchestrator · claude-opus-5-5  waiting for 3 agents              running   0:12
+✶ #1 · gpt-6-luna                 Edit(src/app.js)                  running   0:09
+✔ #2 · kimi-k2.7-code             Added tests for the parser        finished  0:07
+◌ #3 · deepseek-v4-pro            update the docs                   queued       —
+```
+
+When the run is over, that table stays in the chat as a summary.
+
+- **Orchestrator:** it can read and search the project (Read, Glob, Grep, LS) and keep a todo list, but it does not edit anything itself. Its own tools are `spawn_agent`, `wait_agents`, `agent_status` and `cancel_agent`. Its instructions include the full model catalog (cost, quality, uptime, context, reasoning levels, inputs) and guidance on which kind of model fits which kind of work.
+- **Subagents:** each has all the normal tools and sees only its task text. Above the parallel limit, agents wait in a queue.
+- **Permissions:** agents follow the current permission mode. When several ask at once, the dialogs are shown one at a time and each says which agent is asking. Shift+tab and "allow all edits" apply to every running agent.
+- **Stopping:** `esc` stops the orchestrator and every agent. Agents still running when the orchestrator finishes are stopped too.
+- **Chat history:** the task and the orchestrator's summary are added to the current chat, so you can follow up on them.
+
+### `/orch-setup`
+
+| Setting | Description |
+| ------- | ----------- |
+| Orchestrator model | Which model plans and delegates (default `claude-opus-5-5`) |
+| Routing | Which [profile](#providers) serves each provider family's models: Claude, ChatGPT, Gemini, Kimi, DeepSeek. By default, the active profile. The profile supplies the URL and key; the catalog supplies the model id. Anthropic-type profiles use the Messages API, the rest use Chat Completions. |
+| Max parallel agents | 1 to 8 (default 3) |
+| Default agent reasoning | Reasoning level for agents when the orchestrator doesn't choose one. Sent as `output_config.effort` (Anthropic) or `reasoning_effort` (OpenAI-compatible). |
+| Subagent models | Tick which of the 31 catalog models agents may use. `a` enables all, `n` none. Models with uptime under 90% are marked ⚠. |
+
+Settings are saved to `~/.zero/orch.json`, and the catalog is in `src/orch/catalog.js`.
+
+With the mock profile active, orchestration works offline. The mock orchestrator splits the task on commas, spreads the parts across providers, and each mock agent handles its part like a normal prompt. Try `/orch read package.json, list src, search TODO`.
+
 ## Commands
 
 ```
 /help       /clear      /chat       /compact    /cost       /status
-/model      /profiles   /init       /memory     /permissions
+/model      /profiles   /orch       /orch-setup /init       /memory     /permissions
 /settings   /lang       /todos      /tools      /buddy      /mascot
 /verbose    /doctor     /exit
 ```
@@ -226,6 +261,7 @@ src/App.js              main UI
 src/mascot.js           Zero-chan sprite and expressions
 src/i18n.js             English and Russian strings
 src/agent/              agent loop and permission rules
+src/orch/               orchestration: model catalog, setup, controller, orchestrator tools
 src/providers/          anthropic, openai-compatible and mock providers
 src/tools/              tool implementations
 src/commands/           slash commands

@@ -114,6 +114,17 @@ export class OpenAIProvider {
     return h;
   }
 
+  /** fetch, but a network failure says which host and why ("fetch failed" alone says nothing). */
+  async #fetch(url, init) {
+    try {
+      return await fetch(url, init);
+    } catch (e) {
+      if (e.name === 'AbortError' || init?.signal?.aborted) throw e;
+      const cause = e.cause?.code || e.cause?.message || e.message;
+      throw new Error(`Can't reach ${hostOf(this.baseUrl)} (${cause}) — check the "${this.profile.name}" profile`);
+    }
+  }
+
   #check() {
     if (!this.baseUrl) throw new Error(`Profile "${this.profile.name}" has no base URL. Fix it in /profiles.`);
     if (!this.profile.model) throw new Error(`Profile "${this.profile.name}" has no model. Set one with /model <name> or in /profiles.`);
@@ -121,7 +132,7 @@ export class OpenAIProvider {
 
   async *stream({ system, messages, tools, signal }) {
     this.#check();
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+    const res = await this.#fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       signal,
       headers: { ...this.#headers(), accept: 'text/event-stream' },
@@ -129,6 +140,7 @@ export class OpenAIProvider {
         model: this.profile.model,
         messages: toOpenAIMessages(system, messages),
         ...(tools?.length ? { tools: toOpenAITools(tools), tool_choice: 'auto' } : {}),
+        ...(this.profile.reasoningEffort ? { reasoning_effort: this.profile.reasoningEffort } : {}),
         stream: true,
         stream_options: { include_usage: true },
       }),
@@ -165,7 +177,7 @@ export class OpenAIProvider {
 
   async listModels() {
     if (!this.baseUrl) throw new Error('No base URL');
-    const res = await fetch(`${this.baseUrl}/models`, { headers: this.#headers() });
+    const res = await this.#fetch(`${this.baseUrl}/models`, { headers: this.#headers() });
     if (!res.ok) throw new Error(await errorMessage(res));
     const j = await res.json();
     return (j.data ?? []).map((m) => m.id).filter(Boolean).sort();

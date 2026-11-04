@@ -23,6 +23,10 @@ import { ChatPanel } from './components/ChatPanel.js';
 import { ProfilesPanel } from './components/ProfilesPanel.js';
 import { newChatId, saveChat, loadChat, deleteChat, listChats, titleFrom, transcriptFrom } from './utils/chats.js';
 import { fmtTokens } from './i18n.js';
+import { Orchestration, describeToolCall, finalText } from './orch/orchestrator.js';
+import { enabledModels, orchConfig } from './orch/config.js';
+import { AgentsPanel } from './components/AgentsPanel.js';
+import { OrchSetupPanel } from './components/OrchSetupPanel.js';
 
 const pick = (a) => a[Math.floor(Math.random() * a.length)];
 const CLEAR_SCREEN = '\u001b[2J\u001b[3J\u001b[H';
@@ -65,6 +69,12 @@ export function App({ permissionMode: initialMode = settings.permissionMode, all
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatPanel, setChatPanel] = useState(null); // list of chats while the picker is open
   const [profilesOpen, setProfilesOpen] = useState(false);
+  const [orchSetupOpen, setOrchSetupOpen] = useState(false);
+  const [orchView, setOrchView] = useState(null); // live snapshot of the running /orch
+  const orchRenderTimer = useRef(null);
+  // Several agents can ask for permission at once: show one dialog at a time.
+  const dialogRef = useRef(null);
+  const permQueueRef = useRef([]);
   const chatRef = useRef({ id: newChatId(), name: null, createdAt: Date.now() });
   const [chatTokens, setChatTokens] = useState(0);
   const autoStepsRef = useRef(0);
@@ -288,6 +298,29 @@ export function App({ permissionMode: initialMode = settings.permissionMode, all
     }
   };
 
+  const showDialog = (d) => {
+    dialogRef.current = d;
+    setDialog(d);
+  };
+
+  /** Ask the user; queued behind any dialog already on screen. */
+  const askPermission = (req) =>
+    new Promise((resolve) => {
+      const d = { req, resolve };
+      if (dialogRef.current) permQueueRef.current.push(d);
+      else showDialog(d);
+    });
+
+  /** Answer the dialog on screen (and, for cancel, every queued one) and show the next. */
+  const settleDialogs = (answer, all = false) => {
+    const current = dialogRef.current;
+    const rest = all ? permQueueRef.current.splice(0) : [];
+    showDialog(all ? null : permQueueRef.current.shift() ?? null);
+    current?.resolve(answer);
+    for (const d of rest) d.resolve(answer);
+    return current;
+  };
+
   const ui = {
     onText: (id, text, done) => {
       const exists = liveRef.current.some((i) => i.id === id);
@@ -304,12 +337,11 @@ export function App({ permissionMode: initialMode = settings.permissionMode, all
     },
     onTokens: (n) => setTokens(n),
     onModeChange: (m) => setPermissionModeState(m),
-    requestPermission: (req) =>
-      new Promise((resolve) => {
-        patchItem(req.id, { status: 'waiting', preview: req.preview });
-        react('idle', t('buddy.mayI'), 8000);
-        setDialog({ req, resolve });
-      }),
+    requestPermission: (req) => {
+      patchItem(req.id, { status: 'waiting', preview: req.preview });
+      react('idle', t('buddy.mayI'), 8000);
+      return askPermission(req);
+    },
   };
 
   const runPrompt = async (text, display, autoStep = 0) => {
@@ -345,7 +377,103 @@ export function App({ permissionMode: initialMode = settings.permissionMode, all
       }
     } finally {
       updateLive((items) => items.map((i) => (i.type === 'assistant' ? { ...i, done: true } : i)), true);
-      setDialog(null);
+      settleDialogs('no', true);
+      saveCurrentChat();
+      stopLoading();
+    }
+  };
+
+  // ---- orchestration --------------------------------------------------------
+  /** Re-render the live agents panel at most every 80 ms (agents report every streamed token). */
+  const scheduleOrchRender = () => {
+    if (orchRenderTimer.current) return;
+    orchRenderTimer.current = setTimeout(() => {
+      orchRenderTimer.current = null;
+      const orch = orchRef.current;
+      if (orch) setOrchView(orch.snapshot());
+    }, 80);
+  };
+  const orchRef = useRef(null);
+
+  /**
+   * /orch <task>: the orchestrator model plans and spawns subagents; the live panel shows
+   * them, and when it is over a frozen summary and the orchestrator's answer stay in the chat.
+   */
+  const runOrch = async (task) => {
+    if (!enabledModels().length) return app.local(`/orch ${task}`, t('orch.noModels'));
+    commit([{ type: 'user', id: newId('user'), text: `/orch ${task}` }]);
+    const signal = startLoading(t('orch.label'));
+    toolInterruptedRef.current = false;
+    lastToolFailedRef.current = false;
+
+    const orch = new Orchestration({
+      cwd: engine.cwd,
+      signal,
+      permissionMode: () => engine.permissionMode,
+      allowRules: engine.allowRules,
+      requestPermission: (req) => {
+        react('idle', t('buddy.mayI'), 8000);
+        return askPermission(req);
+      },
+      onModeChange: (m) => {
+        engine.permissionMode = m;
+        setPermissionModeState(m);
+      },
+      onChange: scheduleOrchRender,
+    });
+    orchRef.current = orch;
+    setOrchView(orch.snapshot());
+
+    const lead = orch.createOrchestratorEngine();
+    const leadUi = {
+      ...ui,
+      onText: (id, text, done) => {
+        orch.setOrchestratorActivity(t('orch.summarizing'));
+        ui.onText(id, text, done);
+      },
+      onToolStart: (block) => {
+        orch.setOrchestratorActivity(describeToolCall(block, engine.cwd));
+        ui.onToolStart(block);
+      },
+      onModeChange: (m) => {
+        engine.permissionMode = m;
+        setPermissionModeState(m);
+      },
+    };
+
+    let answer = '';
+    try {
+      await lead.runTurn(task, leadUi, signal);
+      answer = finalText(lead.messages);
+      orch.setOrchestratorActivity((answer.split('\n').find((l) => l.trim()) ?? '').replace(/[*_`]/g, '').slice(0, 80), 'done');
+      react('happy', pick(t('buddy.done')));
+      if (settings.bell) stdout.write('\u0007');
+    } catch (e) {
+      if (e instanceof AbortError) {
+        orch.setOrchestratorActivity(t('orch.cancelled'), 'cancelled');
+        updateLive((items) => items.map((i) => (i.type === 'tool' && !isSettled(i) ? { ...i, status: 'interrupted' } : i)), true);
+        react('surprised', t('buddy.stopped'));
+      } else {
+        orch.setOrchestratorActivity(String(e.message).slice(0, 80), 'failed');
+        commit([{ type: 'notice', id: newId('err'), level: 'error', text: t('common.apiError', { msg: e.message }) }]);
+        react('surprised', t('buddy.broke'));
+      }
+    } finally {
+      // Agents the orchestrator never waited for would keep working unseen: stop them.
+      orch.cancelAll();
+      await Promise.all(orch.agents.map((a) => a.done));
+      clearTimeout(orchRenderTimer.current);
+      orchRenderTimer.current = null;
+      updateLive((items) => items.map((i) => (i.type === 'assistant' ? { ...i, done: true } : i)), true);
+      settleDialogs('no', true);
+      commit([{ type: 'orch', id: newId('orch'), snapshot: { ...orch.snapshot(), endedAt: Date.now() } }]);
+      orchRef.current = null;
+      setOrchView(null);
+      // Keep the main conversation aware of what the orchestration did.
+      engine.messages.push(
+        { role: 'user', content: [{ type: 'text', text: `[/orch] ${task}` }] },
+        { role: 'assistant', content: [{ type: 'text', text: answer || '(The orchestration ended without a summary.)' }] },
+      );
       saveCurrentChat();
       stopLoading();
     }
@@ -412,6 +540,11 @@ export function App({ permissionMode: initialMode = settings.permissionMode, all
     openSettings: () => setSettingsOpen(true),
     openChats: () => setChatPanel(chatList()),
     openProfiles: () => setProfilesOpen(true),
+    openOrchSetup: () => setOrchSetupOpen(true),
+    runOrch: (task) => {
+      if (loadingRef.current) return app.local(`/orch ${task}`, t('orch.busy'));
+      runOrch(task);
+    },
     chatList,
     newChat,
     openChat,
@@ -464,20 +597,16 @@ export function App({ permissionMode: initialMode = settings.permissionMode, all
   useInput((input, key) => {
     if (key.ctrl && input === 'o') return toggleVerbose();
     if (dialog && key.ctrl && input === 'c') {
-      const d = dialog;
-      setDialog(null);
       interrupt();
-      d.resolve('no');
+      settleDialogs('no', true);
     }
   });
 
   const answerPermission = (answer) => {
-    const d = dialog;
-    setDialog(null);
+    const d = settleDialogs(answer);
     if (answer === 'always' && d.req.always.mode) setPermissionModeState(d.req.always.mode);
     if (answer !== 'no') patchItem(d.req.id, { status: 'running' });
     react(answer === 'no' ? 'surprised' : 'happy', answer === 'no' ? t('buddy.okay') : t('buddy.thanks'), 2000);
-    d.resolve(answer);
   };
 
   // ---- layout ------------------------------------------------------------
@@ -495,7 +624,18 @@ export function App({ permissionMode: initialMode = settings.permissionMode, all
     ]);
   };
 
-  const showBuddy = settings.showBuddy && columns >= 100 && !dialog && !settingsOpen && !chatPanel && !profilesOpen;
+  const closeOrchSetup = (changed) => {
+    setOrchSetupOpen(false);
+    if (changed) {
+      app.local(
+        '/orch-setup',
+        t('setup.saved', { model: orchConfig.orchestrator, enabled: orchConfig.enabled.length, parallel: orchConfig.maxParallel }),
+      );
+    }
+  };
+
+  const panelOpen = settingsOpen || chatPanel || profilesOpen || orchSetupOpen;
+  const showBuddy = settings.showBuddy && columns >= 100 && !dialog && !panelOpen && !orchView;
   // Always-on footer info: which chat this is and how big it has grown.
   const shortName = chatName().length > 24 ? chatName().slice(0, 23) + '…' : chatName();
   const chatInfo = `${activeProfile().name} · ${shortName} · ${t('tokens.chat', { n: fmtTokens(chatTokens), raw: chatTokens })}`;
@@ -509,9 +649,12 @@ export function App({ permissionMode: initialMode = settings.permissionMode, all
         ${(item) => html`<${Box} key=${item.id} width=${columns}><${MessageItem} key=${item.id} item=${item} columns=${columns} verbose=${verbose} cwd=${engine.originalCwd} model=${model} /></${Box}>`}
       </${Static}>
       ${live.map((item) => html`<${MessageItem} key=${item.id} item=${item} columns=${columns} verbose=${verbose} cwd=${engine.originalCwd} model=${model} />`)}
+      ${orchView && html`<${AgentsPanel} snapshot=${orchView} columns=${columns} />`}
       ${loading && !dialog && html`<${Spinner} verb=${loading.verb} label=${loading.label} startedAt=${loading.startedAt} tokens=${tokens} tip=${loading.tip} chatTokens=${chatTokens} />`}
       ${settingsOpen
         ? html`<${SettingsPanel} columns=${columns} onClose=${closeSettings} />`
+        : orchSetupOpen
+        ? html`<${OrchSetupPanel} columns=${columns} onClose=${closeOrchSetup} />`
         : profilesOpen
         ? html`<${ProfilesPanel} columns=${columns} onClose=${() => setProfilesOpen(false)} />`
         : chatPanel
@@ -529,7 +672,7 @@ export function App({ permissionMode: initialMode = settings.permissionMode, all
         : html`
           <${Box} flexDirection="row" alignItems="flex-end">
             <${PromptInput}
-              isActive=${!dialog && !settingsOpen && !chatPanel && !profilesOpen}
+              isActive=${!dialog && !panelOpen}
               isLoading=${!!loading}
               columns=${promptWidth}
               cwd=${engine.cwd}
